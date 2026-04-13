@@ -30,7 +30,7 @@ const DISCORD_WEBHOOK_URL = "https://ptb.discord.com/api/webhooks/14932051710885
 const API_URL = "https://bigavatar.dpdns.org/api.php"; 
 
 // 🔑 นำ API Key จากหน้าเว็บมาใส่ที่นี่
-const API_KEY = "5de1a6c187ba4e39165c60deee6f8f0f"; 
+const API_KEY = "de2bf0189267191a334070ef5e960519"; 
 
 const MOTD_MESSAGE = "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc";
 // ==========================================
