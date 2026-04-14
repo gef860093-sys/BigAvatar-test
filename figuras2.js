@@ -6,7 +6,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
-const { pipeline } = require('stream/promises'); // ใช้ pipeline จัดการ stream ป้องกันค้าง
+const { pipeline } = require('stream/promises'); 
 const cors = require('cors');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit'); 
@@ -24,7 +24,7 @@ const CONFIG = {
     MOTD_MESSAGE: "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc",
     SYNC_INTERVAL_MS: 5000, 
     WS_PING_INTERVAL_MS: 15000,
-    UPLOAD_TIMEOUT_MS: 30000 // ตัดการอัปโหลดที่นานเกิน 30 วินาที
+    UPLOAD_TIMEOUT_MS: 30000 
 };
 
 const c = { g: '\x1b[32m', b: '\x1b[36m', y: '\x1b[33m', r: '\x1b[31m', p: '\x1b[35m', rst: '\x1b[0m' };
@@ -33,7 +33,6 @@ const logTime = () => `[${new Date().toLocaleTimeString('th-TH')}]`;
 const avatarsDir = path.join(__dirname, "avatars");
 if (!fs.existsSync(avatarsDir)) fs.mkdirSync(avatarsDir, { recursive: true });
 
-// ดัก Error ขั้นสุด
 process.on('uncaughtException', (err) => console.error(`${c.r}${logTime()} [Fatal] ${err.message}${c.rst}`));
 process.on('unhandledRejection', (reason) => console.error(`${c.r}${logTime()} [Promise] ${reason}${c.rst}`));
 
@@ -42,7 +41,7 @@ process.on('unhandledRejection', (reason) => console.error(`${c.r}${logTime()} [
 // ==========================================
 const server_ids = new Map();
 const tokens = new Map();
-const tokenMap = new WeakMap(); // ใช้ WeakMap ป้องกัน Memory Leak จาก Object ws
+const tokenMap = new WeakMap(); 
 const wsMap = new Map(); 
 let hashCache = new Map(); 
 const spamTracker = new Map();
@@ -59,7 +58,7 @@ if (fs.existsSync(cacheFile)) {
 const saveCache = () => fsp.writeFile(cacheFile, JSON.stringify(Object.fromEntries(hashCache))).catch(()=>{});
 
 const fastAxios = axios.create({
-    timeout: 4000, // ลด Timeout ป้องกัน Thread ค้าง
+    timeout: 4000, 
     httpAgent: new http.Agent({ keepAlive: true }),
     httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false })
 });
@@ -83,7 +82,6 @@ const formatUuid = (uuid) => {
     return `${uuid.slice(0, 8)}-${uuid.slice(8, 12)}-${uuid.slice(12, 16)}-${uuid.slice(16, 20)}-${uuid.slice(20)}`;
 };
 
-// 🧹 Safe Cleanup (ไม่บล็อก Event Loop)
 setInterval(async () => { 
     const now = Date.now();
     for (let [id, data] of server_ids.entries()) {
@@ -105,7 +103,6 @@ setInterval(async () => {
     } catch (e) {}
 }, 5 * 60 * 1000);
 
-// ⚡ Sync Worker
 async function syncAndMonitor() {
     if (isSyncing) return; 
     isSyncing = true;
@@ -122,7 +119,6 @@ async function syncAndMonitor() {
         for (const [tokenStr, userInfo] of tokens.entries()) {
             const uname = userInfo.username.toLowerCase();
             if (sqlBlacklist.has(uname) || (CONFIG.ENABLE_WHITELIST && !sqlWhitelist.has(uname))) {
-                // เตะออก
                 tokens.delete(tokenStr);
                 hashCache.delete(userInfo.uuid);
                 saveCache();
@@ -153,6 +149,16 @@ setInterval(syncAndMonitor, CONFIG.SYNC_INTERVAL_MS);
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
+
+// 👇 โค้ดดักจับและแก้ไข // ใน URL ป้องกันบัคหน้าจอ Error ตามรูป
+app.use((req, res, next) => { 
+    if (req.url.includes('//')) {
+        req.url = req.url.replace(/\/{2,}/g, '/'); 
+    }
+    next(); 
+});
+// 👆 =====================================
+
 app.use('/api/', rateLimit({ windowMs: 60000, max: 2000, standardHeaders: false, legacyHeaders: false }));
 
 app.get('/api/motd', (req, res) => res.status(200).send(CONFIG.MOTD_MESSAGE));
@@ -222,7 +228,6 @@ app.put('/api/avatar', async (req, res) => {
     const tempFile = path.join(__dirname, 'avatars', `${userInfo.uuid}.moon.tmp`);
     const finalFile = path.join(__dirname, 'avatars', `${userInfo.uuid}.moon`);
     
-    // ตั้งเวลาตัดจบถ้าอัปโหลดแช่ (Slowloris Protection)
     req.setTimeout(CONFIG.UPLOAD_TIMEOUT_MS, () => { req.destroy(); fsp.unlink(tempFile).catch(()=>{}); });
 
     const writeStream = fs.createWriteStream(tempFile);
@@ -231,7 +236,7 @@ app.put('/api/avatar', async (req, res) => {
     req.on('data', chunk => hash.update(chunk));
 
     try {
-        await pipeline(req, writeStream); // จัดการสตรีมแบบปลอดภัย
+        await pipeline(req, writeStream); 
         await fsp.rename(tempFile, finalFile);
         hashCache.set(userInfo.uuid, hash.digest('hex')); 
         saveCache(); 
@@ -304,7 +309,7 @@ app.get('/', (req, res) => { res.status(200).send(CONFIG.MOTD_MESSAGE); });
 // ⚡ WEBSOCKET (BULLETPROOF)
 // ==========================================
 const server = http.createServer(app);
-server.keepAliveTimeout = 60000; // ปรับให้เหมาะกับโหลดจริง
+server.keepAliveTimeout = 60000; 
 server.headersTimeout = 65000;
 
 const wss = new WebSocket.Server({ server, perMessageDeflate: false });
@@ -323,7 +328,7 @@ wss.on('connection', (ws) => {
                 safeSend(ws, Buffer.from([0]));
             }
             else if (type === 1) { 
-                if (data.length < 6) return; // ป้องกัน Out of Bounds
+                if (data.length < 6) return; 
                 const userInfo = tokens.get(tokenMap.get(ws));
                 if (!userInfo) return;
                 
@@ -344,7 +349,7 @@ wss.on('connection', (ws) => {
                 }
             }
             else if (type === 2 || type === 3) {
-                if (data.length < 17) return; // ป้องกัน Out of Bounds
+                if (data.length < 17) return; 
                 const uuidHex = data.slice(1, 17).toString('hex');
                 const uuid = formatUuid(uuidHex);
                 if (type === 2) { 
@@ -355,7 +360,6 @@ wss.on('connection', (ws) => {
                 }
             }
         } catch (e) {
-            // ดัก Error ทุกชนิดจากการอ่าน Buffer
         } 
     });
     
@@ -387,5 +391,6 @@ server.listen(CONFIG.PORT, '0.0.0.0', () => {
     console.log(`${c.b}🛡️ BIGAVTAR CLOUD - TITANIUM V7${c.rst}`);
     console.log(`${c.g}✅ API Link: ${CONFIG.API_URL}${c.rst}`);
     console.log(`${c.y}⚡ Stream Pipeline & Buffer Boundary Active${c.rst}`);
+    console.log(`${c.y}⚡ URL Double-Slash Filter Active${c.rst}`);
     console.log(`${c.p}==========================================${c.rst}\n`);
 });
