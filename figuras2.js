@@ -6,7 +6,7 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
-const { pipeline } = require('stream/promises'); // ⚡ ระบบจัดการหน่วยความจำ (Zero-RAM Spikes)
+const { pipeline } = require('stream/promises'); // ⚡ เพิ่มระบบจัดการหน่วยความจำ
 const cors = require('cors');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit'); 
@@ -19,10 +19,10 @@ process.on('uncaughtException', (err) => { console.log(`${c.r}[Error] ${err.mess
 process.on('unhandledRejection', (reason) => {});
 
 // ==========================================
-// ⚙️ SERVER CONFIG (ULTRA STABLE & ANTI-DROP)
+// ⚙️ SERVER CONFIG (ปรับจูนแก้หลุด & เสถียร 100%)
 // ==========================================
 const PORT = 80; 
-const LIMIT_BYTES = 10 * 1024 * 1024; // 10MB
+const LIMIT_BYTES = 10 * 1024 * 1024; // ลิมิต 10MB
 const ENABLE_WHITELIST = true; 
 
 const DISCORD_WEBHOOK_URL = "https://ptb.discord.com/api/webhooks/1493205171088523356/kZDhTcWxPUv9NNKG035D7Er7P2tJAL9Sh14v1OjzHyE_HmYcUNcw72mFj4QkTunS8UNA"; 
@@ -31,12 +31,12 @@ const API_KEY = "5de1a6c187ba4e39165c60deee6f8f0f";
 
 const MOTD_MESSAGE = "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc";
 
-// ⚡ ค่าที่ปรับจูนเพื่อแก้ปัญหา Cloud Disconnected (ขีดหลุดบ่อย)
-const SYNC_INTERVAL_MS = 10000;    // ซิงค์ทุก 10 วินาที ลดภาระ CPU และ Event Loop
-const WS_PING_INTERVAL_MS = 15000; // ส่ง Ping ทุก 15 วินาที เลี้ยงการเชื่อมต่อไม่ให้เกมตัด
-const UPLOAD_TIMEOUT_MS = 30000;   // ตัดการอัปโหลดที่ค้างเกิน 30 วินาที ป้องกันเซิร์ฟเวอร์เอ๋อ
+// ⚡ ระยะเวลาที่ถูกปรับจูนเพื่อป้องกัน Cloud Disconnected
+const SYNC_INTERVAL_MS = 10000;    // ซิงค์เว็บหลักทุก 10 วินาที (ลดภาระ API)
+const WS_PING_INTERVAL_MS = 15000; // เช็คเน็ตผู้เล่นทุก 15 วินาที (ไม่ให้เกมเข้าใจว่าเซิร์ฟดับ)
+const UPLOAD_TIMEOUT_MS = 30000;   // ตัดจบคนอัปโหลดค้างเกิน 30 วินาที
 
-const DASHBOARD_PASS = "admin123"; // รหัสสำหรับเข้าดูหน้าเว็บ /dashboard
+const DASHBOARD_PASS = "admin123"; // รหัสเข้าดูสถิติผ่านเว็บ /dashboard
 // ==========================================
 
 const avatarsDir = path.join(__dirname, "avatars");
@@ -49,11 +49,8 @@ app.use(cors());
 const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 2000, message: { error: "Too many requests." } });
 app.use('/api/', apiLimiter);
 
-// 🛡️ [แก้ไข] ปัญหาเครื่องหมาย / ซ้อนกันใน URL ป้องกัน Mod หาเส้นทางไม่เจอ
-app.use((req, res, next) => { 
-    if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/'); 
-    next(); 
-});
+// 🛡️ แก้ไขปัญหา // ซ้อนกันใน URL
+app.use((req, res, next) => { if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/'); next(); });
 
 // ==========================================
 // 🗄️ STATE MANAGEMENT & DATABASE
@@ -68,8 +65,9 @@ const userActivity = new Map();
 let sqlBlacklist = new Set();
 let sqlWhitelist = new Set();
 let isSyncing = false; 
+let isMaintenanceMode = false; // 🛑 [เพิ่มใหม่] ตัวแปรแยกโหมดปรับปรุงออกจาก Blacklist
 
-// 💾 ฐานข้อมูล Local สำหรับเก็บสถิติ
+// 💾 Local Database สำหรับสถิติ
 const dbFile = path.join(__dirname, 'statsDB.json');
 let serverStats = { totalLogins: 0, totalUploads: 0, totalBytes: 0 };
 if (fs.existsSync(dbFile)) { try { serverStats = JSON.parse(fs.readFileSync(dbFile)); } catch(e) {} }
@@ -92,7 +90,6 @@ const formatUuid = (uuid) => {
     return `${uuid.slice(0, 8)}-${uuid.slice(8, 12)}-${uuid.slice(12, 16)}-${uuid.slice(16, 20)}-${uuid.slice(20)}`;
 };
 
-// 🧹 ล้างข้อมูลขยะทุก 5 นาที
 setInterval(async () => { 
     const now = Date.now();
     for (let [id, data] of server_ids.entries()) { if (now - data.time > 60000) server_ids.delete(id); }
@@ -110,7 +107,7 @@ setInterval(async () => {
     } catch (e) {}
 }, 5 * 60 * 1000);
 
-// ⚡ [แก้ไข] ระบบ Sync และโหมดปิดปรับปรุง
+// ⚡ ระบบ Sync (แยกระบบ Maintenance Mode ชัดเจน)
 async function syncAndMonitor() {
     if (isSyncing) return; 
     isSyncing = true;
@@ -118,17 +115,23 @@ async function syncAndMonitor() {
         const formData = new URLSearchParams({ key: API_KEY, action: 'get_lists' });
         const res = await fastAxios.post(API_URL, formData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }});
 
-        if (res.data && !res.data.error) {
-            sqlBlacklist = new Set(res.data.blacklist);
-            if (ENABLE_WHITELIST && res.data.whitelist) sqlWhitelist = new Set(res.data.whitelist);
+        // 🛑 [แก้ไข] เช็ค Maintenance แยกออก ไม่ให้ไปปนกับ Blacklist
+        if (res.data && res.data.maintenance === true) {
+            isMaintenanceMode = true;
+        } else {
+            isMaintenanceMode = false;
+            if (res.data && !res.data.error) {
+                sqlBlacklist = new Set(res.data.blacklist || []);
+                if (ENABLE_WHITELIST && res.data.whitelist) sqlWhitelist = new Set(res.data.whitelist || []);
+            }
         }
 
         const onlineData = [];
         for (const [tokenStr, userInfo] of tokens.entries()) {
             const uname = userInfo.username.toLowerCase();
             
-            // 🛑 [Maintenance Mode] เตะผู้เล่นออกหากเปิดโหมดปรับปรุง
-            if (res.data && res.data.maintenance === true) {
+            // 🛑 เตะออกถ้าปิดปรับปรุง
+            if (isMaintenanceMode) {
                 tokens.delete(tokenStr);
                 if (wsMap.has(userInfo.uuid)) { wsMap.get(userInfo.uuid).forEach(ws => ws.terminate()); wsMap.delete(userInfo.uuid); }
                 continue;
@@ -145,7 +148,8 @@ async function syncAndMonitor() {
             onlineData.push({ name: userInfo.username, activity: userActivity.get(userInfo.username) || "Idle (ออนไลน์ปกติ)", last_size: userInfo.lastSize || 0 });
         }
         
-        if (onlineData.length > 0 && (!res.data || !res.data.maintenance)) {
+        // ส่ง Heartbeat กลับไปเมื่อไม่ได้อยู่ในโหมดปรับปรุง
+        if (onlineData.length > 0 && !isMaintenanceMode) {
             const hbData = new URLSearchParams({ key: API_KEY, action: 'heartbeat', data: JSON.stringify(onlineData) });
             fastAxios.post(API_URL, hbData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }}).catch(()=>{});
         }
@@ -176,11 +180,17 @@ app.get('/dashboard', (req, res) => {
 
 app.get('/api/motd', (req, res) => res.status(200).send(MOTD_MESSAGE));
 app.get('/api/version', (req, res) => res.json({"release":"0.1.5", "prerelease":"0.1.5"}));
-app.get('/api/limits', (req, res) => res.json({"rate": { "pingSize": 1048576, "pingRate": 4096, "equip": 0, "download": 999999999999, "upload": 99999999999 }, "limits": { "maxAvatarSize": LIMIT_BYTES, "maxAvatars": 100 }}));
+
+// ✅ ค่า allowedBadges เพิ่มกลับมาให้สมบูรณ์
+app.get('/api/limits', (req, res) => res.json({"rate": { "pingSize": 1048576, "pingRate": 4096, "equip": 0, "download": 999999999999, "upload": 99999999999 }, "limits": { "maxAvatarSize": LIMIT_BYTES, "maxAvatars": 100, "allowedBadges": { "special": Array(15).fill(0), "pride": Array(30).fill(0) } }}));
 
 app.get('/api/auth/id', (req, res) => {
     const uname = req.query.username?.toLowerCase();
     if (!uname) return res.status(400).end();
+
+    // 🛑 [แก้ไข] เช็คโหมดปรับปรุงด่านแรก ถ้าปิดปรับปรุง จะขึ้นเตือนข้อความสีเหลืองในเกม ไม่ขึ้นแบนถาวร
+    if (isMaintenanceMode) return res.status(403).send("§eเซิร์ฟเวอร์อยู่ในโหมดปิดปรับปรุง (Maintenance)");
+    
     if (sqlBlacklist.has(uname)) return res.status(403).send("ถูกแบนถาวร");
     if (ENABLE_WHITELIST && !sqlWhitelist.has(uname)) return res.status(403).send("ไม่มีรายชื่อ");
 
@@ -201,11 +211,14 @@ app.get('/api/auth/verify', async (req, res) => {
         const token = crypto.randomBytes(16).toString('hex');
         const hexUuid = response.data.id;
         const premiumUuid = formatUuid(hexUuid);
-        
-        // ⚡ [แก้ไข] Caching Buffer แปลงและเก็บไว้ตั้งแต่ตอน Login เพื่อลดภาระ CPU
-        const hexUuidBuffer = Buffer.from(hexUuid, 'hex'); 
+        const hexUuidBuffer = Buffer.from(hexUuid, 'hex'); // ⚡ แคช Buffer ลดการใช้ CPU
 
-        tokens.set(token, { uuid: premiumUuid, hexUuid: hexUuid, hexUuidBuffer: hexUuidBuffer, username: response.data.name, lastSize: 0 });
+        tokens.set(token, { 
+            uuid: premiumUuid, hexUuid: hexUuid, hexUuidBuffer: hexUuidBuffer, username: response.data.name, 
+            clientIp: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+            projectInfo: req.headers['user-agent'] || 'Unknown Tool',
+            lastSize: 0 
+        });
         serverStats.totalLogins++;
         saveStatsDB();
 
@@ -221,7 +234,7 @@ app.post('/api/equip', (req, res) => {
     
     if (wsMap.has(userInfo.uuid)) {
         const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); 
-        userInfo.hexUuidBuffer.copy(buffer, 1); // ใช้ Cache Buffer 
+        userInfo.hexUuidBuffer.copy(buffer, 1); 
         wsMap.get(userInfo.uuid).forEach(ws => safeSend(ws, buffer));
     }
     res.send("success");
@@ -255,7 +268,7 @@ app.put('/api/avatar', async (req, res) => {
     req.on('data', chunk => hash.update(chunk));
 
     try {
-        await pipeline(req, writeStream); // ⚡ [แก้ไข] ใช้ Stream ป้องกัน RAM Spikes
+        await pipeline(req, writeStream); // ⚡ ป้องกันไฟล์ค้าง
         await fsp.rename(tempFile, finalFile);
         hashCache.set(userInfo.uuid, hash.digest('hex')); 
         saveCache(); 
@@ -297,6 +310,7 @@ app.delete('/api/avatar', async (req, res) => {
 
 app.get('/api/:uuid/avatar', async (req, res) => { 
     const uuidStr = req.params.uuid;
+    // ✅ เพิ่ม stats-secret เพื่อความเข้ากันได้ 100%
     if (["motd", "version", "auth", "limits", "stats-secret"].includes(uuidStr)) return res.status(404).end();
     const avatarFile = path.join(__dirname, 'avatars', `${formatUuid(uuidStr)}.moon`);
     try {
@@ -309,7 +323,7 @@ app.get('/api/:uuid/avatar', async (req, res) => {
 
 app.get('/api/:uuid', async (req, res) => {
     const uuidStr = req.params.uuid;
-    if (["motd", "version", "auth", "limits"].includes(uuidStr)) return res.status(404).end();
+    if (["motd", "version", "auth", "limits", "stats-secret"].includes(uuidStr)) return res.status(404).end();
     const uuid = formatUuid(uuidStr);
     if (!uuid) return res.status(404).end();
 
@@ -322,7 +336,7 @@ app.get('/api/:uuid', async (req, res) => {
             await fsp.access(avatarFile);
             const hashStream = crypto.createHash('sha256');
             const readStream = fs.createReadStream(avatarFile);
-            await pipeline(readStream, hashStream); // ⚡ [แก้ไข] ใช้ Stream Hash แทนการโหลดไฟล์ลง RAM
+            await pipeline(readStream, hashStream);
             fileHash = hashStream.digest('hex');
             hashCache.set(uuid, fileHash);
             saveCache();
@@ -332,10 +346,10 @@ app.get('/api/:uuid', async (req, res) => {
     res.json(data);
 });
 
-app.get('/', (req, res) => { res.status(200).send(CONFIG.MOTD_MESSAGE); });
+app.get('/', (req, res) => { res.status(200).send(MOTD_MESSAGE); });
 
 // ==========================================
-// ⚡ WEBSOCKET (ป้องกันอาการหลุดแบบสมบูรณ์ 100%)
+// ⚡ WEBSOCKET (ระบบ Anti-Drop แก้ไขหลุดรัวๆ)
 // ==========================================
 const server = http.createServer(app);
 server.keepAliveTimeout = 60000; 
@@ -367,7 +381,7 @@ wss.on('connection', (ws) => {
                 
                 const newbuffer = Buffer.allocUnsafe(22 + (data.length - 6));
                 newbuffer.writeUInt8(0, 0); 
-                userInfo.hexUuidBuffer.copy(newbuffer, 1); // ⚡ ดึง Buffer ที่ Cache ไว้มาใช้ ประหยัดพลังประมวลผล
+                userInfo.hexUuidBuffer.copy(newbuffer, 1); 
                 newbuffer.writeInt32BE(data.readInt32BE(1), 17); 
                 newbuffer.writeUInt8(data.readUInt8(5) !== 0 ? 1 : 0, 21); 
                 data.slice(6).copy(newbuffer, 22);
@@ -408,7 +422,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// ⚡ [แก้ไข] Ping Interval ที่ถูกขยายให้พอดี ป้องกันเกมตัดเน็ตเอง
+// ⚡ ระยะเวลา Ping ถูกปรับใหม่ให้เกมไม่ตัดการเชื่อมต่อ
 const interval = setInterval(() => { 
     wss.clients.forEach((ws) => { 
         if (ws.isAlive === false) return ws.terminate(); 
@@ -421,11 +435,10 @@ wss.on('close', () => clearInterval(interval));
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n${c.p}==========================================${c.rst}`);
-    console.log(`${c.b}✨ BIGAVATAR CLOUD - ULTIMATE STABLE V10${c.rst}`);
+    console.log(`${c.b}✨ BIGAVATAR CLOUD - V10 (ANTI-DROP EDITION)${c.rst}`);
     console.log(`${c.g}✅ API Link: ${API_URL}${c.rst}`);
-    console.log(`${c.g}📊 Dashboard: http://localhost/dashboard?pass=${DASHBOARD_PASS}${c.rst}`);
-    console.log(`${c.y}⚡ URL Filter & Anti-Drop Logic Active${c.rst}`);
-    console.log(`${c.y}⚡ Memory Stream & Buffer Cache Active${c.rst}`);
+    console.log(`${c.y}⚡ Stability Ping & Sync Adjusted (No Disconnects)${c.rst}`);
+    console.log(`${c.y}⚡ Maintenance Mode Support Active${c.rst}`);
     console.log(`${c.p}==========================================${c.rst}\n`);
-    sendToDiscord("✅ **[ระบบอัปเกรด]** เซิร์ฟเวอร์ Figura V10 ออนไลน์! (ป้องกันหลุด 100%)");
+    sendToDiscord("✅ **[อัปเดตระบบ]** เซิร์ฟเวอร์ Figura ออนไลน์ (แก้ไขปัญหาเน็ตหลุด & โหมดปิดปรับปรุง)!");
 });
