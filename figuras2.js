@@ -24,11 +24,14 @@ const CONFIG = {
     MOTD_MESSAGE: "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc",
     SYNC_INTERVAL_MS: 5000, 
     WS_PING_INTERVAL_MS: 15000,
-    UPLOAD_TIMEOUT_MS: 30000 
+    UPLOAD_TIMEOUT_MS: 30000,
+    // 🔐 รหัสผ่านสำหรับเข้าดูหน้าเว็บ Dashboard (เปลี่ยนได้ตามใจชอบ)
+    DASHBOARD_PASS: "admin123" 
 };
 
 const c = { g: '\x1b[32m', b: '\x1b[36m', y: '\x1b[33m', r: '\x1b[31m', p: '\x1b[35m', rst: '\x1b[0m' };
 const logTime = () => `[${new Date().toLocaleTimeString('th-TH')}]`;
+const startTime = Date.now(); // เก็บเวลาเริ่มเปิดเซิร์ฟ
 
 const avatarsDir = path.join(__dirname, "avatars");
 if (!fs.existsSync(avatarsDir)) fs.mkdirSync(avatarsDir, { recursive: true });
@@ -37,7 +40,7 @@ process.on('uncaughtException', (err) => console.error(`${c.r}${logTime()} [Fata
 process.on('unhandledRejection', (reason) => console.error(`${c.r}${logTime()} [Promise] ${reason}${c.rst}`));
 
 // ==========================================
-// 🗄️ STATE MANAGEMENT
+// 🗄️ STATE MANAGEMENT & DATABASE
 // ==========================================
 const server_ids = new Map();
 const tokens = new Map();
@@ -50,6 +53,14 @@ const userActivity = new Map();
 let sqlBlacklist = new Set();
 let sqlWhitelist = new Set();
 let isSyncing = false; 
+
+// 💾 ระบบฐานข้อมูลสถิติ (Local JSON DB)
+const dbFile = path.join(__dirname, 'statsDB.json');
+let serverStats = { totalLogins: 0, totalUploads: 0, totalBytes: 0 };
+if (fs.existsSync(dbFile)) {
+    try { serverStats = JSON.parse(fs.readFileSync(dbFile)); } catch(e) {}
+}
+const saveStatsDB = () => fsp.writeFile(dbFile, JSON.stringify(serverStats)).catch(()=>{});
 
 const cacheFile = path.join(__dirname, 'hashCache.json');
 if (fs.existsSync(cacheFile)) {
@@ -66,17 +77,8 @@ const fastAxios = axios.create({
 // ==========================================
 // 🛠️ HELPER FUNCTIONS
 // ==========================================
-const safeSend = (ws, buffer) => {
-    if (ws.readyState === WebSocket.OPEN) {
-        try { ws.send(buffer); } catch (e) {}
-    }
-};
-
-const sendToDiscord = (message) => {
-    if (!CONFIG.DISCORD_WEBHOOK_URL) return;
-    fastAxios.post(CONFIG.DISCORD_WEBHOOK_URL, { content: message }).catch(() => {});
-};
-
+const safeSend = (ws, buffer) => { if (ws.readyState === WebSocket.OPEN) { try { ws.send(buffer); } catch (e) {} } };
+const sendToDiscord = (message) => { if (!CONFIG.DISCORD_WEBHOOK_URL) return; fastAxios.post(CONFIG.DISCORD_WEBHOOK_URL, { content: message }).catch(() => {}); };
 const formatUuid = (uuid) => { 
     if (!uuid || uuid.length !== 32) return uuid || "";
     return `${uuid.slice(0, 8)}-${uuid.slice(8, 12)}-${uuid.slice(12, 16)}-${uuid.slice(16, 20)}-${uuid.slice(20)}`;
@@ -84,10 +86,9 @@ const formatUuid = (uuid) => {
 
 setInterval(async () => { 
     const now = Date.now();
-    for (let [id, data] of server_ids.entries()) {
-        if (now - data.time > 60000) server_ids.delete(id); 
-    }
+    for (let [id, data] of server_ids.entries()) { if (now - data.time > 60000) server_ids.delete(id); }
     spamTracker.clear(); 
+    saveStatsDB(); // เซฟสถิติลงไฟล์ทุก 5 นาที
 
     try {
         const files = await fsp.readdir(avatarsDir);
@@ -95,9 +96,7 @@ setInterval(async () => {
             if (file.endsWith('.tmp')) {
                 const filePath = path.join(avatarsDir, file);
                 const stats = await fsp.stat(filePath).catch(()=>null);
-                if (stats && (now - stats.mtimeMs > 10 * 60 * 1000)) {
-                    await fsp.unlink(filePath).catch(()=>{}); 
-                }
+                if (stats && (now - stats.mtimeMs > 10 * 60 * 1000)) { await fsp.unlink(filePath).catch(()=>{}); }
             }
         }
     } catch (e) {}
@@ -150,14 +149,113 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
 
-// 👇 โค้ดดักจับและแก้ไข // ใน URL ป้องกันบัคหน้าจอ Error ตามรูป
 app.use((req, res, next) => { 
-    if (req.url.includes('//')) {
-        req.url = req.url.replace(/\/{2,}/g, '/'); 
-    }
+    if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/'); 
     next(); 
 });
-// 👆 =====================================
+
+// 📊 API ส่งข้อมูลให้หน้า Dashboard
+app.get('/api/server-stats', (req, res) => {
+    if (req.query.pass !== CONFIG.DASHBOARD_PASS) return res.status(403).json({ error: "Unauthorized" });
+    
+    const uptimeSecs = Math.floor((Date.now() - startTime) / 1000);
+    const ramUsage = process.memoryUsage().rss / 1024 / 1024; // MB
+    
+    res.json({
+        onlinePlayers: tokens.size,
+        totalLogins: serverStats.totalLogins,
+        totalUploads: serverStats.totalUploads,
+        totalBytesMB: (serverStats.totalBytes / 1024 / 1024).toFixed(2),
+        ramUsageMB: ramUsage.toFixed(2),
+        uptimeStr: `${Math.floor(uptimeSecs/3600)}h ${Math.floor((uptimeSecs%3600)/60)}m ${uptimeSecs%60}s`
+    });
+});
+
+// 💻 ระบบ Web Dashboard (UI Template)
+app.get('/dashboard', (req, res) => {
+    if (req.query.pass !== CONFIG.DASHBOARD_PASS) {
+        return res.send(`<h2>Access Denied.</h2><p>Please enter the correct password in the URL (e.g. /dashboard?pass=yourpassword)</p>`);
+    }
+
+    const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>BigAvatar Cloud - Dashboard</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
+            .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+            .glow-text { text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }
+        </style>
+    </head>
+    <body class="min-h-screen p-8">
+        <div class="max-w-5xl mx-auto">
+            <header class="mb-10 text-center">
+                <h1 class="text-4xl font-bold text-sky-400 glow-text mb-2">🚀 BIGAVATAR CLOUD</h1>
+                <p class="text-slate-400">Quantum V9 - Live Server Monitor</p>
+            </header>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">🟢 Online Players</h3>
+                    <p id="s-online" class="text-5xl font-bold text-emerald-400">0</p>
+                </div>
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">⚡ RAM Usage</h3>
+                    <p id="s-ram" class="text-5xl font-bold text-amber-400">0 MB</p>
+                </div>
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">⏱️ Uptime</h3>
+                    <p id="s-uptime" class="text-4xl font-bold text-sky-400 mt-2">0h 0m 0s</p>
+                </div>
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">👥 Total Logins (All Time)</h3>
+                    <p id="s-logins" class="text-4xl font-bold text-fuchsia-400 mt-2">0</p>
+                </div>
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">📤 Models Uploaded</h3>
+                    <p id="s-uploads" class="text-4xl font-bold text-indigo-400 mt-2">0</p>
+                </div>
+                <div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105">
+                    <h3 class="text-slate-400 font-medium mb-1">💾 Data Transferred</h3>
+                    <p id="s-bytes" class="text-4xl font-bold text-rose-400 mt-2">0 MB</p>
+                </div>
+            </div>
+            
+            <div class="text-center text-slate-500 text-sm mt-10">
+                Auto-refreshing every 3 seconds • Secure Connection
+            </div>
+        </div>
+
+        <script>
+            const urlParams = new URLSearchParams(window.location.search);
+            const pass = urlParams.get('pass');
+
+            async function fetchStats() {
+                try {
+                    const res = await fetch('/api/server-stats?pass=' + pass);
+                    const data = await res.json();
+                    if(data.error) return;
+
+                    document.getElementById('s-online').innerText = data.onlinePlayers;
+                    document.getElementById('s-ram').innerText = data.ramUsageMB + ' MB';
+                    document.getElementById('s-uptime').innerText = data.uptimeStr;
+                    document.getElementById('s-logins').innerText = data.totalLogins.toLocaleString();
+                    document.getElementById('s-uploads').innerText = data.totalUploads.toLocaleString();
+                    document.getElementById('s-bytes').innerText = data.totalBytesMB + ' MB';
+                } catch(e) {}
+            }
+            
+            fetchStats();
+            setInterval(fetchStats, 3000);
+        </script>
+    </body>
+    </html>`;
+    res.send(html);
+});
 
 app.use('/api/', rateLimit({ windowMs: 60000, max: 2000, standardHeaders: false, legacyHeaders: false }));
 
@@ -188,8 +286,14 @@ app.get('/api/auth/verify', async (req, res) => {
         const token = crypto.randomBytes(16).toString('hex');
         const hexUuid = response.data.id;
         const premiumUuid = formatUuid(hexUuid);
+        const hexUuidBuffer = Buffer.from(hexUuid, 'hex');
+
+        tokens.set(token, { uuid: premiumUuid, hexUuid: hexUuid, hexUuidBuffer: hexUuidBuffer, username: response.data.name, lastSize: 0 });
         
-        tokens.set(token, { uuid: premiumUuid, hexUuid: hexUuid, username: response.data.name, lastSize: 0 });
+        // 💾 บันทึกสถิติคนเข้า
+        serverStats.totalLogins++;
+        saveStatsDB();
+
         console.log(`${c.b}${logTime()} ⚡ [LOGIN] ${c.g}${response.data.name} ${c.p}[${premiumUuid}]${c.rst}`);
         res.send(token);
     } catch (error) { res.status(500).json({ error: 'Auth Error' }); }
@@ -201,7 +305,8 @@ app.post('/api/equip', (req, res) => {
     userActivity.set(userInfo.username, "👕 กำลังสวมใส่ชุด...");
     
     if (wsMap.has(userInfo.uuid)) {
-        const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); Buffer.from(userInfo.hexUuid, 'hex').copy(buffer, 1);
+        const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); 
+        userInfo.hexUuidBuffer.copy(buffer, 1); 
         wsMap.get(userInfo.uuid).forEach(ws => safeSend(ws, buffer));
     }
     res.send("success");
@@ -240,10 +345,17 @@ app.put('/api/avatar', async (req, res) => {
         await fsp.rename(tempFile, finalFile);
         hashCache.set(userInfo.uuid, hash.digest('hex')); 
         saveCache(); 
+
+        // 💾 บันทึกสถิติการอัปโหลด
+        serverStats.totalUploads++;
+        serverStats.totalBytes += contentLength;
+        saveStatsDB();
+
         userActivity.set(userInfo.username, "✅ อัปโหลดสำเร็จ!");
         
         if (wsMap.has(userInfo.uuid)) {
-            const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); Buffer.from(userInfo.hexUuid, 'hex').copy(buffer, 1);
+            const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); 
+            userInfo.hexUuidBuffer.copy(buffer, 1); 
             wsMap.get(userInfo.uuid).forEach(ws => safeSend(ws, buffer));
         }
         res.send("success"); 
@@ -262,7 +374,8 @@ app.delete('/api/avatar', async (req, res) => {
         hashCache.delete(userInfo.uuid);
         saveCache();
         if (wsMap.has(userInfo.uuid)) {
-            const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); Buffer.from(userInfo.hexUuid, 'hex').copy(buffer, 1);
+            const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); 
+            userInfo.hexUuidBuffer.copy(buffer, 1); 
             wsMap.get(userInfo.uuid).forEach(ws => safeSend(ws, buffer));
         }
         res.send("success");
@@ -293,8 +406,12 @@ app.get('/api/:uuid', async (req, res) => {
     
     if (!fileHash) {
         try {
-            const fileBuffer = await fsp.readFile(avatarFile);
-            fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+            await fsp.access(avatarFile);
+            const hashStream = crypto.createHash('sha256');
+            const readStream = fs.createReadStream(avatarFile);
+            await pipeline(readStream, hashStream);
+            fileHash = hashStream.digest('hex');
+            
             hashCache.set(uuid, fileHash);
             saveCache();
         } catch (e) {}
@@ -306,13 +423,17 @@ app.get('/api/:uuid', async (req, res) => {
 app.get('/', (req, res) => { res.status(200).send(CONFIG.MOTD_MESSAGE); });
 
 // ==========================================
-// ⚡ WEBSOCKET (BULLETPROOF)
+// ⚡ WEBSOCKET (QUANTUM ENGINE)
 // ==========================================
 const server = http.createServer(app);
 server.keepAliveTimeout = 60000; 
 server.headersTimeout = 65000;
 
-const wss = new WebSocket.Server({ server, perMessageDeflate: false });
+const wss = new WebSocket.Server({ 
+    server, 
+    perMessageDeflate: false,
+    maxPayload: CONFIG.LIMIT_BYTES + 1048576 
+});
 
 wss.on('connection', (ws) => {
     ws.isAlive = true; 
@@ -320,7 +441,7 @@ wss.on('connection', (ws) => {
 
     ws.on('message', (data) => {
         try {
-            if (!Buffer.isBuffer(data) || data.length < 1 || data.length > CONFIG.LIMIT_BYTES) return; 
+            if (!Buffer.isBuffer(data) || data.length < 1) return; 
 
             const type = data[0];
             if (type === 0) {
@@ -334,7 +455,7 @@ wss.on('connection', (ws) => {
                 
                 const newbuffer = Buffer.allocUnsafe(22 + (data.length - 6));
                 newbuffer.writeUInt8(0, 0); 
-                Buffer.from(userInfo.hexUuid, 'hex').copy(newbuffer, 1); 
+                userInfo.hexUuidBuffer.copy(newbuffer, 1); 
                 newbuffer.writeInt32BE(data.readInt32BE(1), 17); 
                 newbuffer.writeUInt8(data.readUInt8(5) !== 0 ? 1 : 0, 21); 
                 data.slice(6).copy(newbuffer, 22);
@@ -359,8 +480,7 @@ wss.on('connection', (ws) => {
                     if (wsMap.has(uuid)) wsMap.get(uuid).delete(ws); 
                 }
             }
-        } catch (e) {
-        } 
+        } catch (e) {} 
     });
     
     ws.on('error', () => {}); 
@@ -388,9 +508,9 @@ wss.on('close', () => clearInterval(interval));
 
 server.listen(CONFIG.PORT, '0.0.0.0', () => {
     console.log(`\n${c.p}==========================================${c.rst}`);
-    console.log(`${c.b}🛡️ BIGAVTAR CLOUD - TITANIUM V7${c.rst}`);
+    console.log(`${c.b}✨ BIGAVATAR CLOUD - V9 (DASHBOARD EDITION)${c.rst}`);
     console.log(`${c.g}✅ API Link: ${CONFIG.API_URL}${c.rst}`);
-    console.log(`${c.y}⚡ Stream Pipeline & Buffer Boundary Active${c.rst}`);
-    console.log(`${c.y}⚡ URL Double-Slash Filter Active${c.rst}`);
+    console.log(`${c.g}📊 Dashboard: http://localhost/dashboard?pass=${CONFIG.DASHBOARD_PASS}${c.rst}`);
+    console.log(`${c.y}⚡ Server Monitor & Database Active${c.rst}`);
     console.log(`${c.p}==========================================${c.rst}\n`);
 });
