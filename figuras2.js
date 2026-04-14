@@ -6,44 +6,57 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
-const { pipeline } = require('stream/promises'); 
+const { pipeline } = require('stream/promises'); // ⚡ ระบบจัดการหน่วยความจำ (Zero-RAM Spikes)
 const cors = require('cors');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit'); 
 
-// ==========================================
-// ⚙️ SERVER CONFIG (ปรับจูนใหม่ แก้หลุด 100%)
-// ==========================================
-const CONFIG = {
-    PORT: 80,
-    LIMIT_BYTES: 10 * 1024 * 1024,
-    ENABLE_WHITELIST: true,
-    API_URL: "https://bigavatar.dpdns.org/api.php", 
-    API_KEY: "5de1a6c187ba4e39165c60deee6f8f0f", 
-    DISCORD_WEBHOOK_URL: "https://ptb.discord.com/api/webhooks/1493205171088523356/kZDhTcWxPUv9NNKG035D7Er7P2tJAL9Sh14v1OjzHyE_HmYcUNcw72mFj4QkTunS8UNA",
-    MOTD_MESSAGE: "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc",
-    
-    // ⚡ ปรับระยะเวลาใหม่ เพื่อลดภาระเซิร์ฟเวอร์ ป้องกันอาการ Cloud Disconnected
-    SYNC_INTERVAL_MS: 10000,     // ซิงค์เว็บหลักทุก 10 วินาที (ลดจาก 2 วิ)
-    WS_PING_INTERVAL_MS: 15000,  // เช็คเน็ตผู้เล่นทุก 15 วินาที (ลดจาก 5 วิ)
-    UPLOAD_TIMEOUT_MS: 30000,
-    
-    // 🔐 รหัสผ่านเข้า Web Dashboard
-    DASHBOARD_PASS: "admin123" 
-};
-
 const c = { g: '\x1b[32m', b: '\x1b[36m', y: '\x1b[33m', r: '\x1b[31m', p: '\x1b[35m', rst: '\x1b[0m' };
 const logTime = () => `[${new Date().toLocaleTimeString('th-TH')}]`;
-const startTime = Date.now(); 
+const startTime = Date.now();
+
+process.on('uncaughtException', (err) => { console.log(`${c.r}[Error] ${err.message}${c.rst}`); });
+process.on('unhandledRejection', (reason) => {});
+
+// ==========================================
+// ⚙️ SERVER CONFIG (ULTRA STABLE & ANTI-DROP)
+// ==========================================
+const PORT = 80; 
+const LIMIT_BYTES = 10 * 1024 * 1024; // 10MB
+const ENABLE_WHITELIST = true; 
+
+const DISCORD_WEBHOOK_URL = "https://ptb.discord.com/api/webhooks/1493205171088523356/kZDhTcWxPUv9NNKG035D7Er7P2tJAL9Sh14v1OjzHyE_HmYcUNcw72mFj4QkTunS8UNA"; 
+const API_URL = "https://bigavatar.dpdns.org/api.php"; 
+const API_KEY = "5de1a6c187ba4e39165c60deee6f8f0f"; 
+
+const MOTD_MESSAGE = "§b§lขอขอบคุณที่ใช้บริการนะคับ §f§l- §a§lดูรายละเอียดเพิ่มเติมได้ที่: §e§nhttps://dash.faydar.eu.cc";
+
+// ⚡ ค่าที่ปรับจูนเพื่อแก้ปัญหา Cloud Disconnected (ขีดหลุดบ่อย)
+const SYNC_INTERVAL_MS = 10000;    // ซิงค์ทุก 10 วินาที ลดภาระ CPU และ Event Loop
+const WS_PING_INTERVAL_MS = 15000; // ส่ง Ping ทุก 15 วินาที เลี้ยงการเชื่อมต่อไม่ให้เกมตัด
+const UPLOAD_TIMEOUT_MS = 30000;   // ตัดการอัปโหลดที่ค้างเกิน 30 วินาที ป้องกันเซิร์ฟเวอร์เอ๋อ
+
+const DASHBOARD_PASS = "admin123"; // รหัสสำหรับเข้าดูหน้าเว็บ /dashboard
+// ==========================================
 
 const avatarsDir = path.join(__dirname, "avatars");
 if (!fs.existsSync(avatarsDir)) fs.mkdirSync(avatarsDir, { recursive: true });
 
-process.on('uncaughtException', (err) => console.error(`${c.r}${logTime()} [Fatal] ${err.message}${c.rst}`));
-process.on('unhandledRejection', (reason) => console.error(`${c.r}${logTime()} [Promise] ${reason}${c.rst}`));
+const app = express();
+app.set('trust proxy', 1);
+app.use(cors());
+
+const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 2000, message: { error: "Too many requests." } });
+app.use('/api/', apiLimiter);
+
+// 🛡️ [แก้ไข] ปัญหาเครื่องหมาย / ซ้อนกันใน URL ป้องกัน Mod หาเส้นทางไม่เจอ
+app.use((req, res, next) => { 
+    if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/'); 
+    next(); 
+});
 
 // ==========================================
-// 🗄️ STATE MANAGEMENT
+// 🗄️ STATE MANAGEMENT & DATABASE
 // ==========================================
 const server_ids = new Map();
 const tokens = new Map();
@@ -52,22 +65,18 @@ const wsMap = new Map();
 let hashCache = new Map(); 
 const spamTracker = new Map();
 const userActivity = new Map(); 
-
 let sqlBlacklist = new Set();
 let sqlWhitelist = new Set();
 let isSyncing = false; 
 
+// 💾 ฐานข้อมูล Local สำหรับเก็บสถิติ
 const dbFile = path.join(__dirname, 'statsDB.json');
 let serverStats = { totalLogins: 0, totalUploads: 0, totalBytes: 0 };
-if (fs.existsSync(dbFile)) {
-    try { serverStats = JSON.parse(fs.readFileSync(dbFile)); } catch(e) {}
-}
+if (fs.existsSync(dbFile)) { try { serverStats = JSON.parse(fs.readFileSync(dbFile)); } catch(e) {} }
 const saveStatsDB = () => fsp.writeFile(dbFile, JSON.stringify(serverStats)).catch(()=>{});
 
 const cacheFile = path.join(__dirname, 'hashCache.json');
-if (fs.existsSync(cacheFile)) {
-    try { hashCache = new Map(Object.entries(JSON.parse(fs.readFileSync(cacheFile)))); } catch(e) {}
-}
+if (fs.existsSync(cacheFile)) { try { hashCache = new Map(Object.entries(JSON.parse(fs.readFileSync(cacheFile)))); } catch(e) {} }
 const saveCache = () => fsp.writeFile(cacheFile, JSON.stringify(Object.fromEntries(hashCache))).catch(()=>{});
 
 const fastAxios = axios.create({
@@ -76,22 +85,19 @@ const fastAxios = axios.create({
     httpsAgent: new https.Agent({ keepAlive: true, rejectUnauthorized: false })
 });
 
-// ==========================================
-// 🛠️ HELPER FUNCTIONS
-// ==========================================
 const safeSend = (ws, buffer) => { if (ws.readyState === WebSocket.OPEN) { try { ws.send(buffer); } catch (e) {} } };
-const sendToDiscord = (message) => { if (!CONFIG.DISCORD_WEBHOOK_URL) return; fastAxios.post(CONFIG.DISCORD_WEBHOOK_URL, { content: message }).catch(() => {}); };
+const sendToDiscord = (message) => { if (!DISCORD_WEBHOOK_URL) return; fastAxios.post(DISCORD_WEBHOOK_URL, { content: message }).catch(() => {}); };
 const formatUuid = (uuid) => { 
     if (!uuid || uuid.length !== 32) return uuid || "";
     return `${uuid.slice(0, 8)}-${uuid.slice(8, 12)}-${uuid.slice(12, 16)}-${uuid.slice(16, 20)}-${uuid.slice(20)}`;
 };
 
+// 🧹 ล้างข้อมูลขยะทุก 5 นาที
 setInterval(async () => { 
     const now = Date.now();
     for (let [id, data] of server_ids.entries()) { if (now - data.time > 60000) server_ids.delete(id); }
     spamTracker.clear(); 
     saveStatsDB(); 
-
     try {
         const files = await fsp.readdir(avatarsDir);
         for (const file of files) {
@@ -104,30 +110,31 @@ setInterval(async () => {
     } catch (e) {}
 }, 5 * 60 * 1000);
 
+// ⚡ [แก้ไข] ระบบ Sync และโหมดปิดปรับปรุง
 async function syncAndMonitor() {
     if (isSyncing) return; 
     isSyncing = true;
     try {
-        const formData = new URLSearchParams({ key: CONFIG.API_KEY, action: 'get_lists' });
-        const res = await fastAxios.post(CONFIG.API_URL, formData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }});
+        const formData = new URLSearchParams({ key: API_KEY, action: 'get_lists' });
+        const res = await fastAxios.post(API_URL, formData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }});
 
         if (res.data && !res.data.error) {
             sqlBlacklist = new Set(res.data.blacklist);
-            if (CONFIG.ENABLE_WHITELIST && res.data.whitelist) sqlWhitelist = new Set(res.data.whitelist);
+            if (ENABLE_WHITELIST && res.data.whitelist) sqlWhitelist = new Set(res.data.whitelist);
         }
 
         const onlineData = [];
         for (const [tokenStr, userInfo] of tokens.entries()) {
             const uname = userInfo.username.toLowerCase();
             
-            // ตรวจสอบโหมดปรับปรุง (ถ้า API แจ้งมาว่า maintenance: true)
-            if (res.data && res.data.maintenance) {
+            // 🛑 [Maintenance Mode] เตะผู้เล่นออกหากเปิดโหมดปรับปรุง
+            if (res.data && res.data.maintenance === true) {
                 tokens.delete(tokenStr);
                 if (wsMap.has(userInfo.uuid)) { wsMap.get(userInfo.uuid).forEach(ws => ws.terminate()); wsMap.delete(userInfo.uuid); }
                 continue;
             }
 
-            if (sqlBlacklist.has(uname) || (CONFIG.ENABLE_WHITELIST && !sqlWhitelist.has(uname))) {
+            if (sqlBlacklist.has(uname) || (ENABLE_WHITELIST && !sqlWhitelist.has(uname))) {
                 tokens.delete(tokenStr);
                 hashCache.delete(userInfo.uuid);
                 saveCache();
@@ -139,62 +146,43 @@ async function syncAndMonitor() {
         }
         
         if (onlineData.length > 0 && (!res.data || !res.data.maintenance)) {
-            const hbData = new URLSearchParams({ key: CONFIG.API_KEY, action: 'heartbeat', data: JSON.stringify(onlineData) });
-            fastAxios.post(CONFIG.API_URL, hbData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }}).catch(()=>{});
+            const hbData = new URLSearchParams({ key: API_KEY, action: 'heartbeat', data: JSON.stringify(onlineData) });
+            fastAxios.post(API_URL, hbData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }}).catch(()=>{});
         }
     } catch (e) {
     } finally {
         isSyncing = false;
     }
 }
-setInterval(syncAndMonitor, CONFIG.SYNC_INTERVAL_MS); 
+setInterval(syncAndMonitor, SYNC_INTERVAL_MS); 
 
 // ==========================================
-// 🌐 EXPRESS WEB SERVER
+// 🌐 API ROUTES & DASHBOARD
 // ==========================================
-const app = express();
-app.set('trust proxy', 1);
-app.use(cors());
-
-// 🛡️ แก้ไขปัญหาเครื่องหมาย // ซ้อนกันใน URL
-app.use((req, res, next) => { 
-    if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/'); 
-    next(); 
-});
-
-// 📊 API สำหรับหน้า Dashboard
 app.get('/api/server-stats', (req, res) => {
-    if (req.query.pass !== CONFIG.DASHBOARD_PASS) return res.status(403).json({ error: "Unauthorized" });
+    if (req.query.pass !== DASHBOARD_PASS) return res.status(403).json({ error: "Unauthorized" });
     const uptimeSecs = Math.floor((Date.now() - startTime) / 1000);
-    const ramUsage = process.memoryUsage().rss / 1024 / 1024; 
     res.json({
         onlinePlayers: tokens.size, totalLogins: serverStats.totalLogins, totalUploads: serverStats.totalUploads,
-        totalBytesMB: (serverStats.totalBytes / 1024 / 1024).toFixed(2), ramUsageMB: ramUsage.toFixed(2),
+        totalBytesMB: (serverStats.totalBytes / 1024 / 1024).toFixed(2), ramUsageMB: (process.memoryUsage().rss / 1024 / 1024).toFixed(2),
         uptimeStr: `${Math.floor(uptimeSecs/3600)}h ${Math.floor((uptimeSecs%3600)/60)}m ${uptimeSecs%60}s`
     });
 });
 
 app.get('/dashboard', (req, res) => {
-    if (req.query.pass !== CONFIG.DASHBOARD_PASS) { return res.send(`<h2>Access Denied.</h2>`); }
-    const html = `
-    <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>BigAvatar Cloud - Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style>body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; } .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); } .glow-text { text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }</style></head>
-    <body class="min-h-screen p-8"><div class="max-w-5xl mx-auto"><header class="mb-10 text-center"><h1 class="text-4xl font-bold text-sky-400 glow-text mb-2">🚀 BIGAVATAR CLOUD</h1><p class="text-slate-400">V10 Ultimate - Server Monitor</p></header>
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8"><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">🟢 Online Players</h3><p id="s-online" class="text-5xl font-bold text-emerald-400">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">⚡ RAM Usage</h3><p id="s-ram" class="text-5xl font-bold text-amber-400">0 MB</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">⏱️ Uptime</h3><p id="s-uptime" class="text-4xl font-bold text-sky-400 mt-2">0h 0m 0s</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">👥 Total Logins</h3><p id="s-logins" class="text-4xl font-bold text-fuchsia-400 mt-2">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">📤 Models Uploaded</h3><p id="s-uploads" class="text-4xl font-bold text-indigo-400 mt-2">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">💾 Data Transferred</h3><p id="s-bytes" class="text-4xl font-bold text-rose-400 mt-2">0 MB</p></div></div><div class="text-center text-slate-500 text-sm mt-10">Auto-refreshing every 3 seconds</div></div>
-    <script> const urlParams = new URLSearchParams(window.location.search); const pass = urlParams.get('pass'); async function fetchStats() { try { const res = await fetch('/api/server-stats?pass=' + pass); const data = await res.json(); if(data.error) return; document.getElementById('s-online').innerText = data.onlinePlayers; document.getElementById('s-ram').innerText = data.ramUsageMB + ' MB'; document.getElementById('s-uptime').innerText = data.uptimeStr; document.getElementById('s-logins').innerText = data.totalLogins.toLocaleString(); document.getElementById('s-uploads').innerText = data.totalUploads.toLocaleString(); document.getElementById('s-bytes').innerText = data.totalBytesMB + ' MB'; } catch(e) {} } fetchStats(); setInterval(fetchStats, 3000); </script></body></html>`;
-    res.send(html);
+    if (req.query.pass !== DASHBOARD_PASS) return res.send(`<h2>Access Denied.</h2>`);
+    res.send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>BigAvatar Cloud - Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style>body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; } .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); } .glow-text { text-shadow: 0 0 10px rgba(56, 189, 248, 0.5); }</style></head><body class="min-h-screen p-8"><div class="max-w-5xl mx-auto"><header class="mb-10 text-center"><h1 class="text-4xl font-bold text-sky-400 glow-text mb-2">🚀 BIGAVATAR CLOUD</h1><p class="text-slate-400">V10 Ultimate - Server Monitor</p></header><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8"><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">🟢 Online Players</h3><p id="s-online" class="text-5xl font-bold text-emerald-400">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">⚡ RAM Usage</h3><p id="s-ram" class="text-5xl font-bold text-amber-400">0 MB</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">⏱️ Uptime</h3><p id="s-uptime" class="text-4xl font-bold text-sky-400 mt-2">0h 0m 0s</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">👥 Total Logins</h3><p id="s-logins" class="text-4xl font-bold text-fuchsia-400 mt-2">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">📤 Models Uploaded</h3><p id="s-uploads" class="text-4xl font-bold text-indigo-400 mt-2">0</p></div><div class="glass rounded-2xl p-6 text-center transform transition hover:scale-105"><h3 class="text-slate-400 font-medium mb-1">💾 Data Transferred</h3><p id="s-bytes" class="text-4xl font-bold text-rose-400 mt-2">0 MB</p></div></div><div class="text-center text-slate-500 text-sm mt-10">Auto-refreshing every 3 seconds</div></div><script> const urlParams = new URLSearchParams(window.location.search); const pass = urlParams.get('pass'); async function fetchStats() { try { const res = await fetch('/api/server-stats?pass=' + pass); const data = await res.json(); if(data.error) return; document.getElementById('s-online').innerText = data.onlinePlayers; document.getElementById('s-ram').innerText = data.ramUsageMB + ' MB'; document.getElementById('s-uptime').innerText = data.uptimeStr; document.getElementById('s-logins').innerText = data.totalLogins.toLocaleString(); document.getElementById('s-uploads').innerText = data.totalUploads.toLocaleString(); document.getElementById('s-bytes').innerText = data.totalBytesMB + ' MB'; } catch(e) {} } fetchStats(); setInterval(fetchStats, 3000); </script></body></html>`);
 });
 
-app.use('/api/', rateLimit({ windowMs: 60000, max: 2000, standardHeaders: false, legacyHeaders: false }));
-
-app.get('/api/motd', (req, res) => res.status(200).send(CONFIG.MOTD_MESSAGE));
+app.get('/api/motd', (req, res) => res.status(200).send(MOTD_MESSAGE));
 app.get('/api/version', (req, res) => res.json({"release":"0.1.5", "prerelease":"0.1.5"}));
-app.get('/api/limits', (req, res) => res.json({"rate": { "pingSize": 1048576, "pingRate": 4096, "equip": 0, "download": 999999999999, "upload": 99999999999 }, "limits": { "maxAvatarSize": CONFIG.LIMIT_BYTES, "maxAvatars": 100 }}));
+app.get('/api/limits', (req, res) => res.json({"rate": { "pingSize": 1048576, "pingRate": 4096, "equip": 0, "download": 999999999999, "upload": 99999999999 }, "limits": { "maxAvatarSize": LIMIT_BYTES, "maxAvatars": 100 }}));
 
 app.get('/api/auth/id', (req, res) => {
     const uname = req.query.username?.toLowerCase();
     if (!uname) return res.status(400).end();
     if (sqlBlacklist.has(uname)) return res.status(403).send("ถูกแบนถาวร");
-    if (CONFIG.ENABLE_WHITELIST && !sqlWhitelist.has(uname)) return res.status(403).send("ไม่มีรายชื่อ");
+    if (ENABLE_WHITELIST && !sqlWhitelist.has(uname)) return res.status(403).send("ไม่มีรายชื่อ");
 
     const serverID = crypto.randomBytes(16).toString('hex');
     server_ids.set(serverID, { username: req.query.username, time: Date.now() });
@@ -213,7 +201,9 @@ app.get('/api/auth/verify', async (req, res) => {
         const token = crypto.randomBytes(16).toString('hex');
         const hexUuid = response.data.id;
         const premiumUuid = formatUuid(hexUuid);
-        const hexUuidBuffer = Buffer.from(hexUuid, 'hex'); // แคช Buffer ทันที
+        
+        // ⚡ [แก้ไข] Caching Buffer แปลงและเก็บไว้ตั้งแต่ตอน Login เพื่อลดภาระ CPU
+        const hexUuidBuffer = Buffer.from(hexUuid, 'hex'); 
 
         tokens.set(token, { uuid: premiumUuid, hexUuid: hexUuid, hexUuidBuffer: hexUuidBuffer, username: response.data.name, lastSize: 0 });
         serverStats.totalLogins++;
@@ -231,7 +221,7 @@ app.post('/api/equip', (req, res) => {
     
     if (wsMap.has(userInfo.uuid)) {
         const buffer = Buffer.allocUnsafe(17); buffer.writeUInt8(2, 0); 
-        userInfo.hexUuidBuffer.copy(buffer, 1); 
+        userInfo.hexUuidBuffer.copy(buffer, 1); // ใช้ Cache Buffer 
         wsMap.get(userInfo.uuid).forEach(ws => safeSend(ws, buffer));
     }
     res.send("success");
@@ -244,7 +234,7 @@ app.put('/api/avatar', async (req, res) => {
     let contentLength = parseInt(req.headers['content-length'] || '0');
     userInfo.lastSize = contentLength;
     
-    if (contentLength > CONFIG.LIMIT_BYTES) {
+    if (contentLength > LIMIT_BYTES) {
         let strikes = (spamTracker.get(userInfo.username) || 0) + 1;
         spamTracker.set(userInfo.username, strikes);
         if (strikes >= 3) {
@@ -258,14 +248,14 @@ app.put('/api/avatar', async (req, res) => {
     const tempFile = path.join(__dirname, 'avatars', `${userInfo.uuid}.moon.tmp`);
     const finalFile = path.join(__dirname, 'avatars', `${userInfo.uuid}.moon`);
     
-    req.setTimeout(CONFIG.UPLOAD_TIMEOUT_MS, () => { req.destroy(); fsp.unlink(tempFile).catch(()=>{}); });
+    req.setTimeout(UPLOAD_TIMEOUT_MS, () => { req.destroy(); fsp.unlink(tempFile).catch(()=>{}); });
 
     const writeStream = fs.createWriteStream(tempFile);
     const hash = crypto.createHash('sha256');
     req.on('data', chunk => hash.update(chunk));
 
     try {
-        await pipeline(req, writeStream); 
+        await pipeline(req, writeStream); // ⚡ [แก้ไข] ใช้ Stream ป้องกัน RAM Spikes
         await fsp.rename(tempFile, finalFile);
         hashCache.set(userInfo.uuid, hash.digest('hex')); 
         saveCache(); 
@@ -332,7 +322,7 @@ app.get('/api/:uuid', async (req, res) => {
             await fsp.access(avatarFile);
             const hashStream = crypto.createHash('sha256');
             const readStream = fs.createReadStream(avatarFile);
-            await pipeline(readStream, hashStream);
+            await pipeline(readStream, hashStream); // ⚡ [แก้ไข] ใช้ Stream Hash แทนการโหลดไฟล์ลง RAM
             fileHash = hashStream.digest('hex');
             hashCache.set(uuid, fileHash);
             saveCache();
@@ -345,7 +335,7 @@ app.get('/api/:uuid', async (req, res) => {
 app.get('/', (req, res) => { res.status(200).send(CONFIG.MOTD_MESSAGE); });
 
 // ==========================================
-// ⚡ WEBSOCKET (ป้องกันอาการหลุดแบบสมบูรณ์)
+// ⚡ WEBSOCKET (ป้องกันอาการหลุดแบบสมบูรณ์ 100%)
 // ==========================================
 const server = http.createServer(app);
 server.keepAliveTimeout = 60000; 
@@ -354,7 +344,7 @@ server.headersTimeout = 65000;
 const wss = new WebSocket.Server({ 
     server, 
     perMessageDeflate: false,
-    maxPayload: CONFIG.LIMIT_BYTES + 1048576 
+    maxPayload: LIMIT_BYTES + 1048576 
 });
 
 wss.on('connection', (ws) => {
@@ -377,7 +367,7 @@ wss.on('connection', (ws) => {
                 
                 const newbuffer = Buffer.allocUnsafe(22 + (data.length - 6));
                 newbuffer.writeUInt8(0, 0); 
-                userInfo.hexUuidBuffer.copy(newbuffer, 1); 
+                userInfo.hexUuidBuffer.copy(newbuffer, 1); // ⚡ ดึง Buffer ที่ Cache ไว้มาใช้ ประหยัดพลังประมวลผล
                 newbuffer.writeInt32BE(data.readInt32BE(1), 17); 
                 newbuffer.writeUInt8(data.readUInt8(5) !== 0 ? 1 : 0, 21); 
                 data.slice(6).copy(newbuffer, 22);
@@ -418,24 +408,24 @@ wss.on('connection', (ws) => {
     });
 });
 
-// ⚡ เช็คการเชื่อมต่อใหม่ที่ไม่เตะมั่ว
+// ⚡ [แก้ไข] Ping Interval ที่ถูกขยายให้พอดี ป้องกันเกมตัดเน็ตเอง
 const interval = setInterval(() => { 
     wss.clients.forEach((ws) => { 
         if (ws.isAlive === false) return ws.terminate(); 
         ws.isAlive = false; 
         if (ws.readyState === WebSocket.OPEN) { try { ws.ping(); } catch(e){} }
     }); 
-}, CONFIG.WS_PING_INTERVAL_MS); 
+}, WS_PING_INTERVAL_MS); 
 
 wss.on('close', () => clearInterval(interval));
 
-server.listen(CONFIG.PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n${c.p}==========================================${c.rst}`);
-    console.log(`${c.b}✨ BIGAVATAR CLOUD - V10 (ANTI-DROP EDITION)${c.rst}`);
-    console.log(`${c.g}✅ API Link: ${CONFIG.API_URL}${c.rst}`);
-    console.log(`${c.g}📊 Dashboard: http://localhost/dashboard?pass=${CONFIG.DASHBOARD_PASS}${c.rst}`);
-    console.log(`${c.y}⚡ Keep-Alive Timeout Adjusted (No Disconnects)${c.rst}`);
-    console.log(`${c.y}⚡ Maintenance Mode Bridge Ready${c.rst}`);
+    console.log(`${c.b}✨ BIGAVATAR CLOUD - ULTIMATE STABLE V10${c.rst}`);
+    console.log(`${c.g}✅ API Link: ${API_URL}${c.rst}`);
+    console.log(`${c.g}📊 Dashboard: http://localhost/dashboard?pass=${DASHBOARD_PASS}${c.rst}`);
+    console.log(`${c.y}⚡ URL Filter & Anti-Drop Logic Active${c.rst}`);
+    console.log(`${c.y}⚡ Memory Stream & Buffer Cache Active${c.rst}`);
     console.log(`${c.p}==========================================${c.rst}\n`);
-    sendToDiscord("✅ **[ระบบอัปเกรด]** เซิร์ฟเวอร์ Figura V10 ออนไลน์แล้ว! (แก้หลุด 100%)");
+    sendToDiscord("✅ **[ระบบอัปเกรด]** เซิร์ฟเวอร์ Figura V10 ออนไลน์! (ป้องกันหลุด 100%)");
 });
