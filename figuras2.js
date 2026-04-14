@@ -30,7 +30,7 @@ const API_URL = "https://bigavatar.dpdns.org/api.php";
 const API_KEY = "de2bf0189267191a334070ef5e960519"; 
 
 // 🎨 [อัปเกรด] ข้อความ MOTD สวยงาม พรีเมียม และอ่านง่ายขึ้น
-const MOTD_MESSAGE = "§b§l★ §3§lBIGAVATAR §f§lCLOUD §b§l★\n§a✅ §aเชื่อมต่อเซิร์ฟเวอร์เสถียรระดับสูงสุดสำเร็จ!\n§e🔗 §eจัดการโมเดลของคุณได้ที่: §nhttps://dash.faydar.eu.cc";
+const MOTD_MESSAGE = "§b§l★ §3§lBIGAVATAR §f§lCLOUD §b§l★\n§a✅ §aเชื่อมต่อเซิร์ฟเวอร์เสถียรระดับสูงสุดสำเร็จ!\n§e🔗 §eสามารถเข้าไปดูลายละเอียดได้ที่: §nhttps://dash.faydar.eu.cc";
 
 // ⚡ ค่าที่ปรับจูนเพื่อแก้ปัญหา Cloud Disconnected (ขีดหลุดบ่อย)
 const SYNC_INTERVAL_MS = 10000;    
