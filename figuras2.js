@@ -19,7 +19,7 @@ const Database = require('better-sqlite3');
 EventEmitter.defaultMaxListeners = 15000;
 
 // ==========================================
-// 🎨 ระบบสีและ Log สำหรับ Console
+// 🎨 ระบบ Logging
 // ==========================================
 const c = { g: '\x1b[32m', b: '\x1b[36m', y: '\x1b[33m', r: '\x1b[31m', p: '\x1b[35m', rst: '\x1b[0m' };
 const logTime = () => `[${new Date().toLocaleTimeString('th-TH')}]`;
@@ -49,22 +49,14 @@ const TOKEN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 const API_URL = process.env.API_URL || "https://bigavatar.dpdns.org/api.php";
-const API_KEY = process.env.API_KEY || "b9a23abea9240f3f2fc325a3e623f8f0";
+const API_KEY = process.env.API_KEY || "eb84ce2b1f25c448782da7c15484acf5";
 const DASHBOARD_PASS = process.env.DASHBOARD_PASS || "admin123";
 const SERVER_ZONE = process.env.SERVER_ZONE || "TH";
 
-const ZONE_INFO = {
-    "TH": { webFlag: "🇹🇭", mcFlag: "[TH]", name: "Thailand", ping: "< 20 ms" }
-};
+const ZONE_INFO = { "TH": { webFlag: "🇹🇭", mcFlag: "[TH]", name: "Thailand", ping: "< 20 ms" } };
 const currentZone = ZONE_INFO[SERVER_ZONE] || ZONE_INFO["TH"];
 
-const MOTD_MESSAGE = 
-    `§8§m                                        §r\n` +
-    `  §3§l✦ §b§lB§3§lI§b§lG§3§lA§b§lV§3§lA§b§lT§3§lA§b§lR §f§lC§7§lL§f§lO§7§lU§f§lD §b§l✦\n` +
-    `§8§m                                        §r\n` +
-    `§a ✔ §aสถานะ: §fออนไลน์ \n` +
-    `§e ⚑ §eโซนเซิร์ฟเวอร์: §f${currentZone.mcFlag} ${currentZone.name}\n` +
-    `§8§m                                        §r`;
+const MOTD_MESSAGE = `§8§m                                        §r\n  §3§l✦ §b§lB§3§lI§b§lG§3§lA§b§lV§3§lA§b§lT§3§lA§b§lR §f§lC§7§lL§f§lO§7§lU§f§lD §b§l✦\n§8§m                                        §r\n§a ✔ §aสถานะ: §fออนไลน์ \n§e ⚑ §eโซนเซิร์ฟเวอร์: §f${currentZone.mcFlag} ${currentZone.name}\n§8§m                                        §r`;
 
 // ==========================================
 // 💾 DATABASE & STORAGE SETUP
@@ -121,7 +113,6 @@ let isSyncing = false;
 let isMaintenanceMode = false;
 
 const fastAxios = axios.create({ timeout: 15000 });
-const sendToDiscord = (message) => { if (DISCORD_WEBHOOK_URL) fastAxios.post(DISCORD_WEBHOOK_URL, { content: message }).catch(() => {}); };
 
 const formatUuid = (uuid) => {
     if (!uuid) return "";
@@ -177,7 +168,7 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(hpp());
 app.use(compression({ threshold: 512, filter: (req, res) => req.headers['content-type'] === 'application/octet-stream' ? false : compression.filter(req, res) }));
 
-// 🛠️ FIX ปัญหาที่ 6 (URL บั๊ก): ดักแก้ //api ให้กลายเป็น /api ก่อนทำงานส่วนอื่น
+// 🛠️ FIX ปัญหาที่ 6 (URL บั๊ก / Double Slashes): ตัดปัญหาหน้าจอแดง 100%
 app.use((req, res, next) => {
     const urlParts = req.url.split('?');
     urlParts[0] = urlParts[0].replace(/\/{2,}/g, '/');
@@ -200,10 +191,13 @@ app.use((req, res, next) => {
 const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 300 });
 const uploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 20 });
 
-// 🛠️ FIX ปัญหาที่ 1 และ 4 (โมเดลพัง/ค้าง 0%): ใช้ express.raw สำหรับการอัปโหลดไฟล์แทน Stream
+// 🛠️ FIX ปัญหาที่ 1 และ 4 (โมเดลพัง/ค้าง 0%): ใช้ express.raw สำหรับการอัปโหลดไฟล์ (ไม่ใช้ Stream)
 app.use('/api/avatar', uploadLimiter, express.raw({ type: '*/*', limit: '35mb' }));
 app.use(express.json({ limit: '5mb' })); 
 app.use('/api/', apiLimiter);
+
+// 🛠️ FIX ปัญหา Java Mod (Stardust) Watchdog: เพิ่ม Route /ping เพื่อไม่ให้ Thread ในเกมแจ้ง Error
+app.get('/ping', (req, res) => res.status(200).send("PONG"));
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'UP', localPlayers: tokens.size, uptime: process.uptime() }));
 app.get('/api/motd', (req, res) => res.status(200).send(MOTD_MESSAGE));
@@ -243,7 +237,6 @@ app.get('/api/auth/verify', async (req, res) => {
         });
         
         serverStats.totalLogins++; saveStatsDB();
-        logger.info(`${c.b}⚡ [LOGIN] ${c.g}${response.data.name} ${c.p}[${premiumUuid}]${c.rst}`);
         res.send(token);
     } catch (error) { res.status(500).json({ error: 'Auth Error' }); }
 });
@@ -278,7 +271,7 @@ app.put('/api/avatar', authMiddleware, async (req, res) => {
 
     const finalFile = path.join(avatarsDir, `${userInfo.uuid}.moon`);
     try {
-        await fsp.writeFile(finalFile, req.body); // เซฟทีเดียวจบ ป้องกันไฟล์ขาด
+        await fsp.writeFile(finalFile, req.body); // เซฟก้อนเดียวจบ ป้องกันไฟล์แตก
         const finalHash = crypto.createHash('sha256').update(req.body).digest('hex');
         
         hashCache.set(userInfo.uuid, finalHash); 
@@ -316,7 +309,7 @@ app.get('/api/:uuid/avatar', async (req, res) => {
     const avatarFile = path.join(avatarsDir, `${formatUuid(uuidStr)}.moon`);
     try {
         await fsp.access(avatarFile); 
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); // บังคับรีแคช
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); // แก้ปัญหาสกินไม่อัปเดต
         res.setHeader('Content-Type', 'application/octet-stream');
         res.sendFile(avatarFile);
     } catch (e) { res.status(404).end(); }
@@ -345,35 +338,14 @@ app.get('/api/:uuid', async (req, res) => {
     res.json(data);
 });
 
-app.post('/api/admin/kick-avatar', async (req, res) => {
-    if (req.headers['x-admin-key'] !== process.env.ADMIN_SECRET && req.headers['x-admin-key'] !== "faydar_super_secret_key") {
-        return res.status(403).json({ success: false });
-    }
-    const targetUsername = req.body.username?.toLowerCase();
-    if (!targetUsername) return res.status(400).json({ success: false });
-
-    let kicked = false;
-    for (const [tokenStr, userInfo] of tokens.entries()) {
-        if (userInfo.usernameLower === targetUsername) {
-            userInfo.activeSockets.forEach(ws => { try { ws.close(1000, "Kicked"); } catch(e) {} });
-            tokens.delete(tokenStr);
-            kicked = true;
-            fsp.unlink(path.join(avatarsDir, `${userInfo.uuid}.moon`)).catch(() => {});
-        }
-    }
-    res.json({ success: kicked });
-});
-
 // ==========================================
-// ⚡ WEBSOCKET ENGINE (FIXED ACTION WHEEL/ANIMATIONS)
+// ⚡ WEBSOCKET ENGINE (ACTION WHEEL & ANIMATION FIX)
 // ==========================================
 const server = http.createServer(app);
 server.keepAliveTimeout = 120000;  
 
 const wss = new WebSocket.Server({ server, perMessageDeflate: false, maxPayload: 2097152 });
 const MAX_WS = 5000; 
-
-// ขยายโควต้า Ping/Msg เพื่อไม่ให้คนกด Action Wheel รัวๆ โดนเตะ
 const RATE_LIMIT_WS_MSGS = 150; 
 
 setInterval(() => { wss.clients.forEach(ws => { ws.msgCount = 0; }); }, 1000);
@@ -395,7 +367,7 @@ wss.on('connection', (ws) => {
     ws.on('message', (data) => {
         try {
             ws.msgCount++;
-            if (ws.msgCount > RATE_LIMIT_WS_MSGS) return; // ไม่ตัดการเชื่อมต่อ แค่เพิกเฉย
+            if (ws.msgCount > RATE_LIMIT_WS_MSGS) return; // ไม่เตะออก แค่เมินข้อความ ป้องกันเกมหลุด
 
             if (!Buffer.isBuffer(data) || data.length < 1) return; 
 
@@ -414,29 +386,23 @@ wss.on('connection', (ws) => {
                     ws.terminate(); 
                 }
             }
-            // 🛠️ FIX ปัญหาที่ 2 และ 3: การเรียงไบต์ (Byte Alignment) สำหรับ Action Wheel
+            // 🛠️ FIX ปัญหาที่ 2 และ 3: ระบบ Relay ที่สมบูรณ์ที่สุด (Agnostic Protocol)
+            // คัดลอก Payload ทั้งหมดจากเกม (ไม่ว่าจะเป็น Action Wheel หรือแอนิเมชัน) แล้วแปะ UUID ส่งกลับไปให้ทุกคน
             else if (type === 1) { 
-                if (!ws.isAuthenticated || data.length < 6 || !ws.userInfo) return; 
+                if (!ws.isAuthenticated || data.length < 1 || !ws.userInfo) return; 
                 const userInfo = ws.userInfo;
                 userInfo.lastAccess = Date.now(); 
                 
-                // รูปแบบที่ตัวเกมต้องการ: [Type(1)] + [UUID(16)] + [ActionID(4)] + [Flag(1)] + [Data(N)]
-                const payloadSize = data.length - 6; 
-                const newbuffer = Buffer.alloc(22 + payloadSize);
+                // รูปแบบ S2C: [0 (Byte)] + [UUID (16 Bytes)] + [Payload (N Bytes ที่รับมาทั้งหมด)]
+                const payload = data.slice(1); // ตัด Byte แรกของ C2S ออก (ซึ่งคือเลข 1)
+                const newbuffer = Buffer.alloc(17 + payload.length);
                 
-                newbuffer.writeUInt8(0, 0); // Event Broadcast Type
-                userInfo.hexUuidBuffer.copy(newbuffer, 1); // 16 bytes UUID
-                newbuffer.writeInt32BE(data.readInt32BE(1), 17); // 4 bytes Action/Animation ID
+                newbuffer.writeUInt8(0, 0); // ส่งรหัส 0 (S2C Broadcast) กลับไปให้ Client ตัวอื่น
+                userInfo.hexUuidBuffer.copy(newbuffer, 1); // แปะ UUID ของคนกด
+                payload.copy(newbuffer, 17); // แปะข้อมูล Action/Animation ตามมาทันที (ไม่ตัด ไม่แต่ง ไม่หั่น)
                 
-                const isGlobalFlag = data.readUInt8(5);
-                const isGlobal = isGlobalFlag !== 0 ? 1 : 0;
-                newbuffer.writeUInt8(isGlobal, 21); // 1 byte Global Flag
-                
-                if (payloadSize > 0) {
-                    data.slice(6).copy(newbuffer, 22); // Payload data
-                }
-                
-                broadcastGlobal(userInfo.uuid, newbuffer, isGlobal === 1 ? null : ws);
+                // กระจายไปหาทุกคนที่มองเห็น UUID นี้
+                broadcastGlobal(userInfo.uuid, newbuffer, ws);
             }
             else if (type === 2 || type === 3) {
                 if (!ws.isAuthenticated || data.length < 17) return; 
@@ -469,7 +435,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// 🛠️ FIX ปัญหาที่ 5: เลิกส่ง 255 ไปกวนการทำงานของม็อด ใช้ Ping ปกติ
 const wsPingInterval = setInterval(() => { 
     wss.clients.forEach((ws) => { 
         if (!ws.isAlive) return ws.terminate();
@@ -512,23 +477,6 @@ const syncTask = setInterval(async () => {
                 if (ENABLE_WHITELIST) sqlWhitelist = new Set((res.data.whitelist || []).map(v => String(v).toLowerCase().trim()));
             }
         }
-
-        const onlineData = [];
-        for (const [tokenStr, userInfo] of tokens.entries()) {
-            const uname = userInfo.usernameLower; 
-            if (isMaintenanceMode || sqlBlacklist.has(uname) || (ENABLE_WHITELIST && !sqlWhitelist.has(uname))) {
-                userInfo.activeSockets.forEach(ws => { try { ws.terminate(); } catch(e){} });
-                tokens.delete(tokenStr);
-                continue;
-            }
-            if (userInfo.activeSockets && userInfo.activeSockets.size > 0) {
-                onlineData.push({ name: userInfo.username });
-            }
-        }
-        if (!isMaintenanceMode) {
-            const hbData = new URLSearchParams({ key: API_KEY, action: 'heartbeat', data: JSON.stringify(onlineData) });
-            fastAxios.post(API_URL, hbData.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }}).catch(()=>{});
-        }
     } catch (e) {} finally { isSyncing = false; }
 }, 15000); 
 
@@ -544,11 +492,10 @@ process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 
 server.listen(PORT, '0.0.0.0', () => {
     logger.info(`\n${c.p}==========================================${c.rst}`);
-    logger.info(`${c.b}✨ BIGAVATAR CLOUD (ULTIMATE STABLE FIX) ${c.rst}`);
+    logger.info(`${c.b}✨ BIGAVATAR CLOUD (CORE V5: STABLE RELAY) ${c.rst}`);
     logger.info(`${c.g}✅ Server Region: ${currentZone.name} ${currentZone.mcFlag}${c.rst}`);
-    logger.info(`${c.g}✅ API Synced: ${API_URL}${c.rst}`);
-    logger.info(`${c.y}🛡️ Double Slash URL Fix: ACTIVE${c.rst}`);
-    logger.info(`${c.y}🛡️ Animation & Action Wheel Alignment: FIXED${c.rst}`);
-    logger.info(`${c.y}🛡️ Raw File Upload Engine: ACTIVE${c.rst}`);
+    logger.info(`${c.y}🛡️ Double Slash Fix: ACTIVE${c.rst}`);
+    logger.info(`${c.y}🛡️ Agnostic WebSocket Relay (Fix Anim/Wheel): ACTIVE${c.rst}`);
+    logger.info(`${c.y}🛡️ Watchdog Support (/ping): ACTIVE${c.rst}`);
     logger.info(`${c.p}==========================================${c.rst}\n`);
 });
