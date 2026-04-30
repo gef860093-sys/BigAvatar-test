@@ -59,7 +59,7 @@ let MOTD_SUBTITLE = "Welcome FayDarCloud";
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || ""; 
 const API_URL = process.env.API_URL || "https://bigavatar.dpdns.org/api.php"; 
-const API_KEY = process.env.API_KEY || "76103eb13671bab31823dc12ed97edbc"; 
+const API_KEY = process.env.API_KEY || "eb84ce2b1f25c448782da7c15484acf5"; 
 const DASHBOARD_PASS = process.env.DASHBOARD_PASS || "admin123";
 const SERVER_ZONE = process.env.SERVER_ZONE || "TH"; 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "faydar_super_secret_key"; 
