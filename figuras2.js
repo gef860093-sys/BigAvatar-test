@@ -27,7 +27,7 @@ const TOKEN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "";
 const API_URL = process.env.API_URL || "https://bigavatar.dpdns.org/api.php";
-const API_KEY = process.env.API_KEY || "eb84ce2b1f25c448782da7c15484acf5";
+const API_KEY = process.env.API_KEY || "b9a23abea9240f3f2fc325a3e623f8f0";
 const DASHBOARD_PASS = process.env.DASHBOARD_PASS || "admin123";
 const SERVER_ZONE = process.env.SERVER_ZONE || "TH";
 
@@ -79,7 +79,7 @@ const formatUuid = (uuid) => {
 };
 
 // ==========================================
-// 📡 BROADCAST ENGINE (FIXED)
+// 📡 BROADCAST ENGINE
 // ==========================================
 const broadcastToLocalWatchers = (uuid, buffer, excludeWs = null) => {
     const watchers = wsMap.get(uuid);
@@ -113,7 +113,7 @@ const broadcastGlobal = (uuid, buffer, excludeWs = null) => {
 };
 
 // ==========================================
-// 🌐 EXPRESS HTTP SERVER (FIXED UPLOAD)
+// 🌐 EXPRESS HTTP SERVER
 // ==========================================
 const app = express();
 app.set('trust proxy', 1);
@@ -122,9 +122,21 @@ app.use(cors());
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(hpp());
 
-const uploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 30 }); // เพิ่มโควต้าอัปโหลด
+// 🛠️ FIX: ระบบเคลียร์ URL แก้ปัญหา Cannot GET //api//auth/id แบบ 100%
+app.use((req, res, next) => {
+    // แยกส่วน Path และ Query String ออกจากกัน (เพื่อไม่ให้กระทบ Query ที่มีลิงก์)
+    const urlParts = req.url.split('?');
+    // บังคับเปลี่ยน //, ///, //// ให้เป็น / ตัวเดียว เฉพาะในส่วนของ Path
+    urlParts[0] = urlParts[0].replace(/\/{2,}/g, '/');
+    // ประกอบ URL กลับเข้าไปใหม่
+    req.url = urlParts.join('?');
+    
+    res.setTimeout(120000, () => { if (!res.headersSent) res.status(408).end(); }); 
+    next(); 
+});
 
-// ใช้ express.raw แทน Stream แบบเก่า เพื่อแก้ปัญหาไฟล์ค้าง 0%/100% หรือไฟล์พัง
+const uploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 30 }); 
+
 app.use('/api/avatar', uploadLimiter, express.raw({ type: '*/*', limit: '35mb' }));
 app.use(express.json({ limit: '1mb' })); 
 
@@ -181,7 +193,6 @@ app.post('/api/equip', authMiddleware, (req, res) => {
     res.send("success");
 });
 
-// 🛠️ FIX ปัญหาที่ 1 และ 4 (อัปโหลดพัง/ไฟล์เสีย): เปลี่ยนมารับข้อมูลดิบ (Raw) เซฟลงทีเดียว
 app.put('/api/avatar', authMiddleware, async (req, res) => {
     const userInfo = req.userInfo;
     userInfo.lastAccess = Date.now(); 
@@ -233,7 +244,6 @@ app.get('/api/:uuid/avatar', async (req, res) => {
     const avatarFile = path.join(avatarsDir, `${formatUuid(uuidStr)}.moon`);
     try {
         await fsp.access(avatarFile); 
-        // บังคับให้โหลดใหม่เพื่อไม่ให้สกินเก่าค้าง
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.setHeader('Content-Type', 'application/octet-stream');
         res.sendFile(avatarFile);
@@ -264,7 +274,7 @@ app.get('/api/:uuid', async (req, res) => {
 });
 
 // ==========================================
-// ⚡ WEBSOCKET ENGINE (FIXED ANIMATION/WHEEL)
+// ⚡ WEBSOCKET ENGINE
 // ==========================================
 const server = http.createServer(app);
 server.keepAliveTimeout = 120000;  
@@ -272,7 +282,6 @@ server.keepAliveTimeout = 120000;
 const wss = new WebSocket.Server({ server, perMessageDeflate: false, maxPayload: 1048576 });
 const MAX_WS = 5000; 
 
-// 🛠️ FIX ปัญหาที่ 5 (Reconnect บ่อย): ขยาย Rate Limit ให้ครอบคลุมการกด Action Wheel รัวๆ
 const RATE_LIMIT_WS_MSGS = 150; 
 
 setInterval(() => { wss.clients.forEach(ws => { ws.msgCount = 0; }); }, 1000);
@@ -294,7 +303,7 @@ wss.on('connection', (ws) => {
     ws.on('message', (data) => {
         try {
             ws.msgCount++;
-            if (ws.msgCount > RATE_LIMIT_WS_MSGS) return; // แค่เมินข้อความ ไม่เตะออก (แก้ Ping สูง/ค้าง)
+            if (ws.msgCount > RATE_LIMIT_WS_MSGS) return; 
 
             if (!Buffer.isBuffer(data) || data.length < 1 || data.length > 1048576) return; 
 
@@ -313,28 +322,24 @@ wss.on('connection', (ws) => {
                     ws.terminate(); 
                 }
             }
-            // 🛠️ FIX ปัญหาที่ 2 และ 3 (Animation / Action Wheel): ประกอบ Packet กลับให้ถูกต้อง 100%
             else if (type === 1) { 
                 if (!ws.isAuthenticated || data.length < 6 || !ws.userInfo) return; 
                 const userInfo = ws.userInfo;
                 userInfo.lastAccess = Date.now(); 
                 
-                // รูปแบบที่ถูกต้อง: [ID(1)] + [UUID(16)] + [Int32(4)] + [Boolean(1)] + [Payload(N)]
                 const payloadSize = data.length - 6;
                 const newbuffer = Buffer.alloc(22 + payloadSize);
-                newbuffer.writeUInt8(0, 0); // Event Type สำหรับส่งกลับ
+                newbuffer.writeUInt8(0, 0); 
                 userInfo.hexUuidBuffer.copy(newbuffer, 1); 
                 
-                newbuffer.writeInt32BE(data.readInt32BE(1), 17); // Animation/Action ID
-                
-                const isGlobal = data.readUInt8(5) !== 0 ? 1 : 0;
-                newbuffer.writeUInt8(isGlobal, 21); // ส่ง Global Flag กลับไป
-                
-                if (payloadSize > 0) {
-                    data.slice(6).copy(newbuffer, 22); // Payload ข้อมูลการขยับ/กดปุ่ม
-                }
-                
-                broadcastGlobal(userInfo.uuid, newbuffer, isGlobal === 1 ? null : ws);
+                try {
+                    newbuffer.writeInt32BE(data.readInt32BE(1), 17); 
+                    const isGlobal = data.readUInt8(5) !== 0 ? 1 : 0;
+                    newbuffer.writeUInt8(isGlobal, 21); 
+                    if (payloadSize > 0) data.slice(6).copy(newbuffer, 22);
+                    
+                    broadcastGlobal(userInfo.uuid, newbuffer, isGlobal === 1 ? null : ws);
+                } catch (bufferErr) {}
             }
             else if (type === 2 || type === 3) {
                 if (!ws.isAuthenticated || data.length < 17) return; 
@@ -375,7 +380,6 @@ const wsPingInterval = setInterval(() => {
     }); 
 }, 25000); 
 
-// ซิงก์รายชื่อผู้เล่นจาก Backend แบบไม่โหลดหนัก
 setInterval(async () => {
     try {
         if (!API_URL || !API_KEY) return; 
